@@ -1,0 +1,3 @@
+# AstrBot 基金分析插件依赖
+akshare>=1.10.0
+pandas>=1.5.0

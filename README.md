@@ -54,7 +54,13 @@ git clone https://github.com/2529huang/astrbot_plugin_zhouzhou.git astrbot_plugi
 
 2. **安装 Python 依赖**
 ```bash
-pip install akshare
+cd astrbot_plugin_fund_analyzer
+pip install -r requirements.txt
+```
+
+或手动安装：
+```bash
+pip install akshare pandas
 ```
 
 3. **重启 AstrBot 或热重载插件**

@@ -1,18 +1,19 @@
-"""
+﻿"""
 AstrBot 基金数据分析插件
 使用 AKShare 开源库获取基金数据，进行分析和展示
 默认分析：国投瑞银白银期货(LOF)A (代码: 161226)
 """
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api.event.filter import command
-from astrbot.api.star import Context, Star, register
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, StarTools, register
 
 # 默认超时时间（秒）- AKShare获取LOF数据需要较长时间
 DEFAULT_TIMEOUT = 120  # 2分钟
@@ -232,9 +233,9 @@ class FundAnalyzer:
 
         try:
             end_date = datetime.now()
-            start_date = end_date - timedelta(
-                days=days * 2
-            )  # 多取一些以确保有足够交易日
+            # 使用 days * 3 以覆盖长假期（如春节、国庆），确保有足够交易日
+            # 额外加 60 天作为技术指标计算的预热数据
+            start_date = end_date - timedelta(days=days * 3 + 60)
 
             df = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -339,7 +340,7 @@ class FundAnalyzer:
         self, history_data: list[dict]
     ) -> dict[str, Any]:
         """
-        计算技术指标
+        计算技术指标（委托给 quant.py 中的完整实现）
 
         Args:
             history_data: 历史数据列表
@@ -350,87 +351,86 @@ class FundAnalyzer:
         if not history_data or len(history_data) < 5:
             return {}
 
+        # 使用 quant.py 中的量化分析器
+        from .ai_analyzer.quant import QuantAnalyzer
+
+        quant = QuantAnalyzer()
+        indicators = quant.calculate_all_indicators(history_data)
+
         closes = [d["close"] for d in history_data]
-
-        # 计算简单移动平均
-        def sma(data, period):
-            if len(data) < period:
-                return None
-            return sum(data[-period:]) / period
-
-        # 计算最近收益率
-        def calculate_return(data, days):
-            if len(data) < days + 1:
-                return None
-            return ((data[-1] - data[-(days + 1)]) / data[-(days + 1)]) * 100
-
-        # 计算波动率 (标准差)
-        def calculate_volatility(data, period):
-            if len(data) < period:
-                return None
-            recent = data[-period:]
-            mean = sum(recent) / len(recent)
-            variance = sum((x - mean) ** 2 for x in recent) / len(recent)
-            return variance**0.5
-
-        ma5 = sma(closes, 5)
-        ma10 = sma(closes, 10)
-        ma20 = sma(closes, 20)
-
         current_price = closes[-1] if closes else 0
 
-        # 判断趋势
-        trend = "震荡"
-        if ma5 and ma10 and ma20:
-            if current_price > ma5 > ma10 > ma20:
-                trend = "强势上涨"
-            elif current_price > ma5 > ma10:
-                trend = "上涨趋势"
-            elif current_price < ma5 < ma10 < ma20:
-                trend = "强势下跌"
-            elif current_price < ma5 < ma10:
-                trend = "下跌趋势"
-
+        # 转换为兼容格式
         return {
-            "ma5": round(ma5, 4) if ma5 else None,
-            "ma10": round(ma10, 4) if ma10 else None,
-            "ma20": round(ma20, 4) if ma20 else None,
-            "return_5d": round(calculate_return(closes, 5), 2)
-            if calculate_return(closes, 5)
-            else None,
-            "return_10d": round(calculate_return(closes, 10), 2)
-            if calculate_return(closes, 10)
-            else None,
-            "return_20d": round(calculate_return(closes, 20), 2)
-            if calculate_return(closes, 20)
-            else None,
-            "volatility": round(calculate_volatility(closes, 20), 4)
-            if calculate_volatility(closes, 20)
-            else None,
+            "ma5": round(indicators.ma5, 4) if indicators.ma5 else None,
+            "ma10": round(indicators.ma10, 4) if indicators.ma10 else None,
+            "ma20": round(indicators.ma20, 4) if indicators.ma20 else None,
+            "return_5d": None,  # 由 quant.py 的绩效分析提供
+            "return_10d": None,
+            "return_20d": None,
+            "volatility": None,
             "high_20d": max(closes[-20:]) if len(closes) >= 20 else max(closes),
             "low_20d": min(closes[-20:]) if len(closes) >= 20 else min(closes),
-            "trend": trend,
+            "trend": indicators.signal,
             "current_price": current_price,
         }
 
 
 @register(
     "astrbot_plugin_fund_analyzer",
-    "AstrBot",
+    "2529huang",
     "基金数据分析插件 - 使用AKShare获取LOF/ETF基金数据",
     "1.0.0",
 )
 class FundAnalyzerPlugin(Star):
     """基金分析插件主类"""
 
+    # 用户设置文件名
+    SETTINGS_FILE = "user_settings.json"
+
     def __init__(self, context: Context):
         super().__init__(context)
         self.analyzer = FundAnalyzer()
-        # 存储用户默认基金设置
-        self.user_fund_settings: dict[str, str] = {}
         # 延迟初始化 AI 分析器
         self._ai_analyzer = None
+        # 获取插件数据目录
+        self._data_dir = Path(StarTools.get_data_dir(context, "fund_analyzer"))
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        # 加载用户设置
+        self.user_fund_settings: dict[str, str] = self._load_user_settings()
+        # 检查依赖
+        self._check_dependencies()
         logger.info("基金分析插件已加载")
+
+    def _check_dependencies(self):
+        """检查必要依赖是否已安装"""
+        try:
+            import akshare  # noqa: F401
+            import pandas  # noqa: F401
+        except ImportError as e:
+            logger.warning(
+                f"基金分析插件依赖未完全安装: {e}\n请执行: pip install akshare pandas"
+            )
+
+    def _load_user_settings(self) -> dict[str, str]:
+        """从文件加载用户设置"""
+        settings_path = self._data_dir / self.SETTINGS_FILE
+        if settings_path.exists():
+            try:
+                with open(settings_path, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"加载用户设置失败: {e}")
+        return {}
+
+    def _save_user_settings(self):
+        """保存用户设置到文件"""
+        settings_path = self._data_dir / self.SETTINGS_FILE
+        try:
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(self.user_fund_settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"保存用户设置失败: {e}")
 
     @property
     def ai_analyzer(self):
@@ -440,7 +440,6 @@ class FundAnalyzerPlugin(Star):
 
             self._ai_analyzer = AIFundAnalyzer(self.context)
         return self._ai_analyzer
-        logger.info("基金分析插件已加载")
 
     def _get_user_fund(self, user_id: str) -> str:
         """获取用户设置的默认基金代码"""
@@ -530,7 +529,7 @@ class FundAnalyzerPlugin(Star):
 💡 投资建议: 请结合自身风险承受能力谨慎投资
 """.strip()
 
-    @command("基金")
+    @filter.command("基金")
     async def fund_query(self, event: AstrMessageEvent, code: str = None):
         """
         查询基金实时行情
@@ -563,7 +562,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"查询基金行情出错: {e}")
             yield event.plain_result(f"❌ 查询失败: {str(e)}")
 
-    @command("基金分析")
+    @filter.command("基金分析")
     async def fund_analysis(self, event: AstrMessageEvent, code: str = None):
         """
         基金技术分析
@@ -605,7 +604,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"基金分析出错: {e}")
             yield event.plain_result(f"❌ 分析失败: {str(e)}")
 
-    @command("基金历史")
+    @filter.command("基金历史")
     async def fund_history(
         self, event: AstrMessageEvent, code: str = None, days: str = "10"
     ):
@@ -687,7 +686,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"查询基金历史出错: {e}")
             yield event.plain_result(f"❌ 查询失败: {str(e)}")
 
-    @command("搜索基金")
+    @filter.command("搜索基金")
     async def search_fund(self, event: AstrMessageEvent, keyword: str = ""):
         """
         搜索LOF基金
@@ -747,7 +746,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"搜索基金出错: {e}")
             yield event.plain_result(f"❌ 搜索失败: {str(e)}")
 
-    @command("设置基金")
+    @filter.command("设置基金")
     async def set_default_fund(self, event: AstrMessageEvent, code: str = ""):
         """
         设置默认关注的基金
@@ -771,6 +770,7 @@ class FundAnalyzerPlugin(Star):
             if info:
                 user_id = event.get_sender_id()
                 self.user_fund_settings[user_id] = code
+                self._save_user_settings()  # 持久化保存
                 yield event.plain_result(
                     f"✅ 已设置默认基金\n"
                     f"📊 {info.code} - {info.name}\n"
@@ -792,7 +792,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"设置默认基金出错: {e}")
             yield event.plain_result(f"❌ 设置失败: {str(e)}")
 
-    @command("智能分析")
+    @filter.command("智能分析")
     async def ai_fund_analysis(self, event: AstrMessageEvent, code: str = None):
         """
         使用大模型进行智能基金分析（含量化数据）
@@ -889,7 +889,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"智能分析出错: {e}")
             yield event.plain_result(f"❌ 分析失败: {str(e)}")
 
-    @command("量化分析")
+    @filter.command("量化分析")
     async def quant_analysis(self, event: AstrMessageEvent, code: str = None):
         """
         纯量化分析（无需大模型）
@@ -963,7 +963,7 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"量化分析出错: {e}")
             yield event.plain_result(f"❌ 分析失败: {str(e)}")
 
-    @command("基金帮助")
+    @filter.command("基金帮助")
     async def fund_help(self, event: AstrMessageEvent):
         """显示基金分析插件帮助信息"""
         help_text = """
