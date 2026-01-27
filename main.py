@@ -14,14 +14,17 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.utils.t2i.renderer import HtmlRenderer
 
 # 导入股票分析模块
 from .stock import StockAnalyzer, StockInfo
+# 导入本地图片生成器
+from .image_generator import render_fund_image, PLAYWRIGHT_AVAILABLE
 
 # 默认超时时间（秒）- AKShare获取LOF数据需要较长时间
 DEFAULT_TIMEOUT = 120  # 2分钟
 # 数据缓存有效期（秒）
-CACHE_TTL = 300  # 5分钟
+CACHE_TTL = 1800  # 30分钟
 
 
 @dataclass
@@ -114,6 +117,24 @@ class FundAnalyzer:
         except (ValueError, TypeError):
             return default
 
+    async def _fetch_with_retry(self, func, *args, max_retries=3, **kwargs):
+        """
+        带重试机制的异步数据获取 helper
+        """
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs), timeout=DEFAULT_TIMEOUT
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                if attempt == max_retries - 1:
+                    raise e
+                wait_time = (attempt + 1) * 2  # 线性退避: 2s, 4s, 6s...
+                logger.warning(
+                    f"数据获取失败 (第{attempt + 1}次重试): {e}, 等待 {wait_time}秒..."
+                )
+                await asyncio.sleep(wait_time)
+
     async def _get_lof_data(self):
         """获取LOF基金数据（带缓存）"""
         now = datetime.now()
@@ -130,17 +151,16 @@ class FundAnalyzer:
         # 缓存过期或不存在，重新获取
         logger.info("正在从东方财富获取LOF基金数据，请稍候...")
         try:
-            df = await asyncio.wait_for(
-                asyncio.to_thread(self._ak.fund_lof_spot_em),
-                timeout=DEFAULT_TIMEOUT,
-            )
+            # 使用重试机制
+            df = await self._fetch_with_retry(self._ak.fund_lof_spot_em)
+
             # 更新缓存
             self._lof_cache = df
             self._lof_cache_time = now
             logger.info(f"LOF基金数据获取成功，共 {len(df)} 只基金")
             return df
-        except asyncio.TimeoutError:
-            logger.error(f"获取LOF基金数据超时 (>{DEFAULT_TIMEOUT}秒)")
+        except Exception as e:
+            logger.error(f"获取LOF基金数据失败: {e}")
             # 如果有旧缓存，返回旧缓存
             if self._lof_cache is not None:
                 logger.warning("使用过期的缓存数据")
@@ -359,19 +379,28 @@ class FundAnalyzer:
 
         quant = QuantAnalyzer()
         indicators = quant.calculate_all_indicators(history_data)
+        perf = quant.calculate_performance(history_data)
 
         closes = [d["close"] for d in history_data]
         current_price = closes[-1] if closes else 0
+
+        # 计算区间收益率
+        def calc_return(days):
+            if len(closes) > days:
+                prev = closes[-(days + 1)]
+                if prev != 0:
+                    return (current_price - prev) / prev * 100
+            return None
 
         # 转换为兼容格式
         return {
             "ma5": round(indicators.ma5, 4) if indicators.ma5 else None,
             "ma10": round(indicators.ma10, 4) if indicators.ma10 else None,
             "ma20": round(indicators.ma20, 4) if indicators.ma20 else None,
-            "return_5d": None,  # 由 quant.py 的绩效分析提供
-            "return_10d": None,
-            "return_20d": None,
-            "volatility": None,
+            "return_5d": calc_return(5),
+            "return_10d": calc_return(10),
+            "return_20d": calc_return(20),
+            "volatility": perf.volatility if perf else None,
             "high_20d": max(closes[-20:]) if len(closes) >= 20 else max(closes),
             "low_20d": min(closes[-20:]) if len(closes) >= 20 else min(closes),
             "trend": indicators.signal,
@@ -400,6 +429,10 @@ class FundAnalyzerPlugin(Star):
         self.analyzer = FundAnalyzer()
         # 初始化股票分析器
         self.stock_analyzer = StockAnalyzer()
+        # 初始化图片渲染器
+        self.image_renderer = HtmlRenderer()
+        # 是否使用本地图片生成器（优先使用）
+        self.use_local_renderer = PLAYWRIGHT_AVAILABLE
         # 延迟初始化 AI 分析器
         self._ai_analyzer = None
         # 获取插件数据目录
@@ -459,10 +492,10 @@ class FundAnalyzerPlugin(Star):
 
     def _normalize_fund_code(self, code: str | int | None) -> str | None:
         """标准化基金代码，补齐前导0到6位
-        
+
         Args:
             code: 基金代码，可能是字符串、整数或None
-            
+
         Returns:
             标准化后的6位基金代码字符串，如果输入为None则返回None
         """
@@ -728,7 +761,16 @@ class FundAnalyzerPlugin(Star):
             except (ValueError, AttributeError):
                 return 0.0
 
-        def format_item(data: dict, unit: str = "元/克") -> str:
+        def format_item(
+            data: dict, unit: str = "美元/盎司", divisor: float = 1.0
+        ) -> str:
+            """格式化单个金属品种的价格信息
+
+            Args:
+                data: 价格数据字典
+                unit: 显示单位
+                divisor: 除数，用于单位转换（如白银可能需要除以100）
+            """
             if not data:
                 return "  暂无数据"
 
@@ -738,28 +780,40 @@ class FundAnalyzerPlugin(Star):
             )
             trend_emoji = "📈" if change_rate > 0 else "📉" if change_rate < 0 else "➡️"
 
-            return f"""  {trend_emoji} 最新价: {data["price"]:.2f} {unit}
-  {change_emoji} 涨跌: {data.get("change", 0):+.2f} ({data.get("change_rate", "0%")})
-  📊 今开: {data.get("open", 0):.2f} | 最高: {data.get("high", 0):.2f} | 最低: {data.get("low", 0):.2f}
-  💹 买入: {data.get("buy_price", 0):.2f} | 卖出: {data.get("sell_price", 0):.2f}"""
+            # 应用单位转换
+            price = data["price"] / divisor
+            change = data.get("change", 0) / divisor
+            open_p = data.get("open", 0) / divisor
+            high_p = data.get("high", 0) / divisor
+            low_p = data.get("low", 0) / divisor
+            buy_p = data.get("buy_price", 0) / divisor
+            sell_p = data.get("sell_price", 0) / divisor
+
+            return f"""  {trend_emoji} 最新价: {price:.2f} {unit}
+  {change_emoji} 涨跌: {change:+.2f} ({data.get("change_rate", "0%")})
+  📊 今开: {open_p:.2f} | 最高: {high_p:.2f} | 最低: {low_p:.2f}
+  💹 买入: {buy_p:.2f} | 卖出: {sell_p:.2f}"""
 
         lines = [
             "💰 今日贵金属行情（国际现货）",
             "━━━━━━━━━━━━━━━━━",
         ]
 
-        # 黄金T+D
+        # 黄金 - 国际金价，单位是美元/盎司
         if "au_td" in prices:
             lines.append("🥇 黄金")
-            lines.append(format_item(prices["au_td"], "美元/盎司"))
+            lines.append(format_item(prices["au_td"], "美元/盎司", 1.0))
             if prices["au_td"].get("update_time"):
                 lines.append(f"  🕐 更新: {prices['au_td']['update_time']}")
             lines.append("")
 
-        # 白银T+D
+        # 白银 - 国际银价，API返回的是美分/盎司，需要除以100转为美元/盎司
         if "ag_td" in prices:
             lines.append("🥈 白银")
-            lines.append(format_item(prices["ag_td"], "美元/盎司"))
+            # 白银价格如果大于1000，说明是美分/盎司，需要除以100
+            silver_price = prices["ag_td"].get("price", 0)
+            divisor = 100.0 if silver_price > 1000 else 1.0
+            lines.append(format_item(prices["ag_td"], "美元/盎司", divisor))
             if prices["ag_td"].get("update_time"):
                 lines.append(f"  🕐 更新: {prices['ag_td']['update_time']}")
             lines.append("")
@@ -934,7 +988,7 @@ class FundAnalyzerPlugin(Star):
             normalized_code = self._normalize_fund_code(code)
             fund_code = normalized_code or self._get_user_fund(user_id)
 
-            yield event.plain_result(f"📊 正在分析基金 {fund_code}...")
+            yield event.plain_result(f"📊 正在生成基金 {fund_code} 分析报告...")
 
             # 获取实时行情
             info = await self.analyzer.get_lof_realtime(fund_code)
@@ -945,15 +999,63 @@ class FundAnalyzerPlugin(Star):
             # 获取历史数据进行分析
             history = await self.analyzer.get_lof_history(fund_code, days=30)
 
+            # 计算技术指标
+            indicators = {}
             if history:
                 indicators = self.analyzer.calculate_technical_indicators(history)
-                yield event.plain_result(self._format_analysis(info, indicators))
-            else:
-                yield event.plain_result(
-                    f"📊 【{info.name}】\n"
-                    "暂无足够历史数据进行技术分析\n"
-                    f"当前价格: {info.latest_price:.4f}"
+                # 绘制小图用于报告
+                plot_img = await asyncio.to_thread(
+                    self._plot_history_chart, history, info.name
                 )
+            else:
+                plot_img = None
+
+            # 准备模板数据
+            ma_data = []
+            if indicators:
+                for ma in ["ma5", "ma10", "ma20"]:
+                    if indicators.get(ma):
+                        ma_data.append({"name": ma.upper(), "value": indicators[ma]})
+
+            data = {
+                "fund_name": info.name,
+                "fund_code": info.code,
+                "latest_price": info.latest_price,
+                "change_amount": info.change_amount,
+                "change_rate": info.change_rate,
+                "plot_img": plot_img,
+                "trend": indicators.get("trend", "数据不足"),
+                "volatility": indicators.get("volatility"),
+                "return_5d": indicators.get("return_5d"),
+                "return_10d": indicators.get("return_10d"),
+                "return_20d": indicators.get("return_20d"),
+                "ma_data": ma_data,
+                "generated_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            # 读取模板
+            template_path = self._data_dir / "templates" / "analysis_report.html"
+            # 如果不在数据目录，尝试检查插件目录
+            if not template_path.exists():
+                template_path = (
+                    Path(__file__).parent / "templates" / "analysis_report.html"
+                )
+
+            if not template_path.exists():
+                # 降级到文本模式
+                yield event.plain_result(self._format_analysis(info, indicators))
+                return
+
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_str = f.read()
+
+            # 渲染图片
+            img_url = await self.image_renderer.render_custom_template(
+                tmpl_str=template_str, tmpl_data=data, return_url=True
+            )
+
+            # 发送图片
+            yield event.image_result(img_url)
 
         except ImportError:
             yield event.plain_result(
@@ -964,6 +1066,115 @@ class FundAnalyzerPlugin(Star):
         except Exception as e:
             logger.error(f"基金分析出错: {e}")
             yield event.plain_result(f"❌ 分析失败: {str(e)}")
+
+    def _plot_history_chart(self, history: list[dict], fund_name: str) -> str | None:
+        """
+        绘制历史行情走势图 (价格+均线+成交量) 并返回 Base64 字符串
+        """
+        try:
+            import base64
+            import io
+            import matplotlib.pyplot as plt
+            import matplotlib.gridspec as gridspec
+            import matplotlib.dates as mdates
+            import pandas as pd
+
+            # 设置中文字体，防止乱码
+            plt.rcParams["font.sans-serif"] = [
+                "SimHei",
+                "Arial Unicode MS",
+                "Microsoft YaHei",
+                "WenQuanYi Micro Hei",
+                "sans-serif",
+            ]
+            plt.rcParams["axes.unicode_minus"] = False
+
+            # 准备数据
+            df = pd.DataFrame(history)
+            if df.empty:
+                return None
+
+            df["date"] = pd.to_datetime(df["date"])
+            dates = df["date"]
+            closes = df["close"]
+            volumes = df["volume"]
+
+            # 计算均线
+            df["ma5"] = df["close"].rolling(window=5).mean()
+            df["ma10"] = df["close"].rolling(window=10).mean()
+            df["ma20"] = df["close"].rolling(window=20).mean()
+
+            # 创建画布
+            fig = plt.figure(figsize=(10, 6), dpi=100)
+            gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.15)
+
+            # 主图：价格 + 均线
+            ax1 = plt.subplot(gs[0])
+            ax1.plot(dates, closes, label="收盘价", color="#333333", linewidth=1.5)
+            ax1.plot(
+                dates, df["ma5"], label="MA5", color="#f5222d", linewidth=1.0, alpha=0.8
+            )
+            ax1.plot(
+                dates,
+                df["ma10"],
+                label="MA10",
+                color="#faad14",
+                linewidth=1.0,
+                alpha=0.8,
+            )
+
+            # 只有数据足够时才画MA20
+            if len(df) >= 20:
+                ax1.plot(
+                    dates,
+                    df["ma20"],
+                    label="MA20",
+                    color="#52c41a",
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+
+            ax1.set_title(f"{fund_name} - 价格走势", fontsize=14, pad=10)
+            ax1.grid(True, linestyle="--", alpha=0.3)
+            ax1.legend(loc="upper left", frameon=True, fontsize=9)
+
+            # 副图：成交量
+            ax2 = plt.subplot(gs[1], sharex=ax1)
+
+            # 根据涨跌设置颜色 (红涨绿跌)
+            colors = []
+            for i in range(len(df)):
+                if i == 0:
+                    c = "#f5222d" if df.iloc[i].get("change_rate", 0) > 0 else "#52c41a"
+                else:
+                    change = df.iloc[i]["close"] - df.iloc[i - 1]["close"]
+                    c = "#f5222d" if change >= 0 else "#52c41a"
+                colors.append(c)
+
+            ax2.bar(dates, volumes, color=colors, alpha=0.8)
+            ax2.set_ylabel("成交量", fontsize=10)
+            ax2.grid(True, linestyle="--", alpha=0.3)
+
+            # 日期格式化
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+            plt.setp(ax1.get_xticklabels(), visible=False)  # 隐藏主图X轴标签
+            plt.gcf().autofmt_xdate()  # 自动旋转日期
+
+            plt.tight_layout()
+
+            # 保存到内存
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format="png", bbox_inches="tight")
+            buffer.seek(0)
+
+            # 转 Base64
+            image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
+            plt.close()
+
+            return image_base64
+        except Exception as e:
+            logger.error(f"绘图失败: {e}")
+            return None
 
     @filter.command("基金历史")
     async def fund_history(
@@ -990,7 +1201,7 @@ class FundAnalyzerPlugin(Star):
                 num_days = 10
 
             yield event.plain_result(
-                f"📜 正在查询基金 {fund_code} 近 {num_days} 日历史..."
+                f"📜 正在生成基金 {fund_code} 近 {num_days} 日行情报告..."
             )
 
             # 获取基金名称
@@ -1000,48 +1211,75 @@ class FundAnalyzerPlugin(Star):
             history = await self.analyzer.get_lof_history(fund_code, days=num_days)
 
             if history:
-                text_lines = [
-                    f"📜 【{fund_name}】近 {len(history)} 日行情",
-                    "━━━━━━━━━━━━━━━━━",
-                ]
-
-                # 只显示最近的数据
-                for item in history[-min(10, len(history)) :]:
-                    change = item.get("change_rate", 0)
-                    emoji = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
-                    text_lines.append(
-                        f"{item['date']} | {item['close']:.4f} | {emoji}{change:+.2f}%"
-                    )
-
-                if len(history) > 10:
-                    text_lines.append(f"... 共 {len(history)} 条记录")
-
-                text_lines.append("━━━━━━━━━━━━━━━━━")
+                # 绘制走势图
+                plot_img = await asyncio.to_thread(
+                    self._plot_history_chart, history, fund_name
+                )
 
                 # 计算区间统计
                 closes = [d["close"] for d in history]
-                changes = [d["change_rate"] for d in history]
-
                 total_return = (
                     ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] else 0
                 )
-                up_days = sum(1 for c in changes if c > 0)
-                down_days = sum(1 for c in changes if c < 0)
 
-                text_lines.append("📊 区间统计:")
-                text_lines.append(f"  • 区间涨跌: {total_return:+.2f}%")
-                text_lines.append(f"  • 上涨天数: {up_days} 天")
-                text_lines.append(f"  • 下跌天数: {down_days} 天")
-                text_lines.append(f"  • 最高价: {max(closes):.4f}")
-                text_lines.append(f"  • 最低价: {min(closes):.4f}")
+                # 准备模板数据
+                data = {
+                    "fund_name": fund_name,
+                    "fund_code": fund_code,
+                    "days": num_days,
+                    "history_list": list(reversed(history)),  # 倒序显示，最近的在前面
+                    "plot_img": plot_img,
+                    "total_return": total_return,
+                    "max_price": max(closes),
+                    "min_price": min(closes),
+                    "generated_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
 
-                yield event.plain_result("\n".join(text_lines))
+                # 读取模板
+                template_path = (
+                    Path(__file__).parent / "templates" / "history_report.html"
+                )
+                if not template_path.exists():
+                    yield event.plain_result(f"❌ 模板文件不存在: {template_path}")
+                    return
+
+                # 渲染图片 - 优先使用本地渲染器
+                if self.use_local_renderer:
+                    try:
+                        img_path = await render_fund_image(
+                            template_path=template_path,
+                            template_data=data,
+                            width=420
+                        )
+                        yield event.image_result(img_path)
+                    except Exception as e:
+                        logger.warning(f"本地渲染失败，回退到网络渲染: {e}")
+                        # 回退到网络渲染
+                        with open(template_path, "r", encoding="utf-8") as f:
+                            template_str = f.read()
+                        img_url = await self.image_renderer.render_custom_template(
+                            tmpl_str=template_str,
+                            tmpl_data=data,
+                            return_url=True,
+                        )
+                        yield event.image_result(img_url)
+                else:
+                    # 使用网络渲染
+                    with open(template_path, "r", encoding="utf-8") as f:
+                        template_str = f.read()
+                    img_url = await self.image_renderer.render_custom_template(
+                        tmpl_str=template_str,
+                        tmpl_data=data,
+                        return_url=True,
+                    )
+                    yield event.image_result(img_url)
+
             else:
                 yield event.plain_result(f"❌ 未找到基金 {fund_code} 的历史数据")
 
         except ImportError:
             yield event.plain_result(
-                "❌ AKShare 库未安装\n请管理员执行: pip install akshare"
+                "❌ AKShare 库未安装\n请管理员执行: pip install akshare matplotlib"
             )
         except TimeoutError as e:
             yield event.plain_result(f"⏰ {str(e)}\n💡 数据源响应较慢，请稍后再试")
@@ -1217,8 +1455,43 @@ class FundAnalyzerPlugin(Star):
                 # 获取技术信号
                 signal, score = self.ai_analyzer.get_technical_signal(history or [])
 
-                # 格式化输出
-                header = f"""
+                # 简单处理 Markdown 加粗，使其在 HTML 中生效
+                # 注意：这只是一个简单的替换，复杂的 Markdown 建议引入 markdown 库
+                formatted_content = analysis_result.replace(
+                    "**", ""
+                )  # 暂时去除加粗符，因为预设样式可能不兼容，或者改为 HTML 标签
+                # 如果想支持加粗： formatted_content = analysis_result.replace("**", "<b>", 1).replace("**", "</b>", 1) ... 需要正则
+                # 这里简单起见，利用 white-space: pre-wrap，直接显示原文即可，或者做简单清洗
+                # 实际上，保留 ** 也行，用户能看懂。为了美观，我们可以尝试简单的正则替换
+                import re
+
+                formatted_content = re.sub(
+                    r"\*\*(.*?)\*\*", r"<strong>\1</strong>", analysis_result
+                )
+
+                # 准备模板数据
+                data = {
+                    "fund_name": info.name,
+                    "fund_code": info.code,
+                    "latest_price": info.latest_price,
+                    "change_amount": info.change_amount,
+                    "change_rate": info.change_rate,
+                    "signal": signal,
+                    "score": score,
+                    "analysis_content": formatted_content,
+                    "generated_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+
+                # 读取模板
+                template_path = self._data_dir / "templates" / "ai_analysis_report.html"
+                if not template_path.exists():
+                    template_path = (
+                        Path(__file__).parent / "templates" / "ai_analysis_report.html"
+                    )
+
+                if not template_path.exists():
+                    # 降级到文本模式
+                    header = f"""
 🤖 【{info.name}】智能量化分析报告
 ━━━━━━━━━━━━━━━━━
 📅 分析时间: {datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -1226,16 +1499,21 @@ class FundAnalyzerPlugin(Star):
 📊 技术信号: {signal} (评分: {score})
 ━━━━━━━━━━━━━━━━━
 """.strip()
+                    yield event.plain_result(f"{header}\n\n{analysis_result}")
+                else:
+                    with open(template_path, "r", encoding="utf-8") as f:
+                        template_str = f.read()
 
-                yield event.plain_result(f"{header}\n\n{analysis_result}")
+                    # 渲染图片
+                    img_url = await self.image_renderer.render_custom_template(
+                        tmpl_str=template_str, tmpl_data=data, return_url=True
+                    )
 
-                # 添加免责声明
-                yield event.plain_result(
-                    "━━━━━━━━━━━━━━━━━\n"
-                    "⚠️ 免责声明: 以上分析仅供参考，不构成投资建议。\n"
-                    "量化回测基于历史数据，不代表未来表现。\n"
-                    "投资有风险，入市需谨慎！请结合自身情况做出决策。"
-                )
+                    # 发送图片
+                    yield event.image_result(img_url)
+
+                # 添加免责声明 (如果是图片模式，免责声明已包含在图片底部，这里可以省略，或者发一条简短的)
+                # yield event.plain_result("⚠️ 投资有风险，决策需谨慎。")
 
             except ValueError as e:
                 yield event.plain_result(f"❌ {str(e)}")
@@ -1332,13 +1610,243 @@ class FundAnalyzerPlugin(Star):
             logger.error(f"量化分析出错: {e}")
             yield event.plain_result(f"❌ 分析失败: {str(e)}")
 
+    def _plot_comparison_chart(
+        self,
+        history_a: list[dict],
+        name_a: str,
+        history_b: list[dict],
+        name_b: str,
+    ) -> str | None:
+        """
+        绘制双基金对比走势图 (归一化收益率)
+        """
+        try:
+            import base64
+            import io
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            import pandas as pd
+
+            # 设置中文字体
+            plt.rcParams["font.sans-serif"] = [
+                "SimHei",
+                "Arial Unicode MS",
+                "Microsoft YaHei",
+                "WenQuanYi Micro Hei",
+                "sans-serif",
+            ]
+            plt.rcParams["axes.unicode_minus"] = False
+
+            # 转换为DataFrame
+            df_a = pd.DataFrame(history_a)
+            df_b = pd.DataFrame(history_b)
+
+            if df_a.empty or df_b.empty:
+                return None
+
+            df_a["date"] = pd.to_datetime(df_a["date"])
+            df_b["date"] = pd.to_datetime(df_b["date"])
+
+            # 确保按日期排序
+            df_a = df_a.sort_values("date")
+            df_b = df_b.sort_values("date")
+
+            # 找到公共日期范围
+            common_dates = pd.merge(
+                df_a[["date"]], df_b[["date"]], on="date", how="inner"
+            )["date"]
+
+            if common_dates.empty:
+                return None
+
+            # 过滤只保留公共日期的数据
+            df_a = df_a[df_a["date"].isin(common_dates)]
+            df_b = df_b[df_b["date"].isin(common_dates)]
+
+            # 计算累计收益率 (归一化)
+            base_a = df_a.iloc[0]["close"]
+            base_b = df_b.iloc[0]["close"]
+
+            if base_a == 0 or base_b == 0:
+                return None
+
+            df_a["norm_close"] = (df_a["close"] - base_a) / base_a * 100
+            df_b["norm_close"] = (df_b["close"] - base_b) / base_b * 100
+
+            # 绘图
+            fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+
+            ax.plot(
+                df_a["date"],
+                df_a["norm_close"],
+                label=f"{name_a}",
+                color="#1890ff",
+                linewidth=2,
+            )
+            ax.plot(
+                df_b["date"],
+                df_b["norm_close"],
+                label=f"{name_b}",
+                color="#eb2f96",
+                linewidth=2,
+            )
+
+            # 填充差异区域
+            ax.fill_between(
+                df_a["date"],
+                df_a["norm_close"],
+                df_b["norm_close"],
+                where=(df_a["norm_close"] > df_b["norm_close"]),
+                interpolate=True,
+                color="#1890ff",
+                alpha=0.1,
+            )
+            ax.fill_between(
+                df_a["date"],
+                df_a["norm_close"],
+                df_b["norm_close"],
+                where=(df_a["norm_close"] < df_b["norm_close"]),
+                interpolate=True,
+                color="#eb2f96",
+                alpha=0.1,
+            )
+
+            ax.set_title("累计收益率对比 (%)", fontsize=14, pad=10)
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.legend(loc="upper left", frameon=True)
+
+            # 格式化Y轴百分比
+            import matplotlib.ticker as mtick
+
+            ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+
+            # 日期格式化
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+            plt.gcf().autofmt_xdate()
+
+            plt.tight_layout()
+
+            # 保存
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format="png", bbox_inches="tight")
+            buffer.seek(0)
+
+            image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
+            plt.close()
+
+            return image_base64
+
+        except Exception as e:
+            logger.error(f"对比绘图失败: {e}")
+            return None
+
+    @filter.command("基金对比")
+    async def fund_compare(
+        self, event: AstrMessageEvent, code1: str = None, code2: str = None
+    ):
+        """
+        对比两只基金的表现
+        用法: 基金对比 [代码1] [代码2]
+        示例: 基金对比 161226 160220
+        """
+        if not code1 or not code2:
+            yield event.plain_result(
+                "❌ 请提供两个基金代码\n用法: 基金对比 代码1 代码2\n示例: 基金对比 161226 160220"
+            )
+            return
+
+        try:
+            # 标准化代码
+            code1 = self._normalize_fund_code(code1) or code1
+            code2 = self._normalize_fund_code(code2) or code2
+
+            yield event.plain_result(f"⚖️ 正在对比基金 {code1} vs {code2}...")
+
+            # 并发获取两个基金的信息和历史数据
+            # 使用 gather 提高效率
+            task1 = self.analyzer.get_lof_realtime(code1)
+            task2 = self.analyzer.get_lof_realtime(code2)
+            task3 = self.analyzer.get_lof_history(code1, days=60)
+            task4 = self.analyzer.get_lof_history(code2, days=60)
+
+            info1, info2, hist1, hist2 = await asyncio.gather(
+                task1, task2, task3, task4
+            )
+
+            if not info1:
+                yield event.plain_result(f"❌ 未找到基金: {code1}")
+                return
+            if not info2:
+                yield event.plain_result(f"❌ 未找到基金: {code2}")
+                return
+            if not hist1 or len(hist1) < 10:
+                yield event.plain_result(f"⚠️ 基金 {code1} 历史数据不足")
+                return
+            if not hist2 or len(hist2) < 10:
+                yield event.plain_result(f"⚠️ 基金 {code2} 历史数据不足")
+                return
+
+            # 计算量化指标
+            from .ai_analyzer.quant import QuantAnalyzer
+
+            quant = QuantAnalyzer()
+
+            perf1 = quant.calculate_performance(hist1)
+            perf2 = quant.calculate_performance(hist2)
+
+            if not perf1 or not perf2:
+                yield event.plain_result("❌ 计算绩效指标失败")
+                return
+
+            # 绘制对比图
+            plot_img = await asyncio.to_thread(
+                self._plot_comparison_chart, hist1, info1.name, hist2, info2.name
+            )
+
+            # 准备模板数据
+            data = {
+                "fund_a_name": info1.name,
+                "fund_b_name": info2.name,
+                "fund_a_code": info1.code,
+                "fund_b_code": info2.code,
+                "days": 60,
+                "metrics_a": perf1,
+                "metrics_b": perf2,
+                "plot_img": plot_img,
+                "generated_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            # 渲染模板
+            template_path = self._data_dir / "templates" / "comparison_report.html"
+            if not template_path.exists():
+                template_path = (
+                    Path(__file__).parent / "templates" / "comparison_report.html"
+                )
+
+            if not template_path.exists():
+                yield event.plain_result("❌ 模板文件缺失")
+                return
+
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_str = f.read()
+
+            img_url = await self.image_renderer.render_custom_template(
+                tmpl_str=template_str, tmpl_data=data, return_url=True
+            )
+
+            yield event.image_result(img_url)
+
+        except Exception as e:
+            logger.error(f"基金对比出错: {e}")
+            yield event.plain_result(f"❌ 对比失败: {str(e)}")
+
     @filter.command("基金帮助")
     async def fund_help(self, event: AstrMessageEvent):
         """显示基金分析插件帮助信息"""
         help_text = """
 📊 基金/股票分析插件帮助
 ━━━━━━━━━━━━━━━━━
-� 贵金属行情:
+💰 贵金属行情:
 🔹 今日行情 - 查询金价银价实时行情
 ━━━━━━━━━━━━━━━━━
 📈 A股实时行情 (缓存10分钟):
@@ -1348,6 +1856,7 @@ class FundAnalyzerPlugin(Star):
 📊 LOF基金功能:
 🔹 基金 [代码] - 查询基金实时行情
 🔹 基金分析 [代码] - 技术分析(均线/趋势)
+🔹 基金对比 [代码1] [代码2] - ⚖️对比两只基金
 🔹 量化分析 [代码] - 📈专业量化指标分析
 🔹 智能分析 [代码] - 🤖AI量化深度分析
 🔹 基金历史 [代码] [天数] - 查看历史行情
@@ -1364,6 +1873,7 @@ class FundAnalyzerPlugin(Star):
   • 搜索股票 茅台
   • 基金 161226
   • 基金分析
+  • 基金对比 161226 513100
   • 量化分析 161226
   • 智能分析 161226
   • 基金历史 161226 20
@@ -1381,6 +1891,7 @@ class FundAnalyzerPlugin(Star):
 💡 A股数据缓存10分钟，仅供参考
 💡 投资有风险，入市需谨慎！
 """.strip()
+        yield event.plain_result(help_text)
         yield event.plain_result(help_text)
 
     async def terminate(self):

@@ -2,3 +2,5 @@
 akshare>=1.10.0
 pandas>=1.5.0
 aiohttp>=3.8.0
+matplotlib>=3.7.0jinja2>=3.0.0
+playwright>=1.40.0

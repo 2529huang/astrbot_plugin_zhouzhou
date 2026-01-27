@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>基金对比报告</title>
+    <style>
+        body {
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            margin: 0;
+            padding: 0;
+            color: #333;
+            background-color: transparent;
+            display: inline-block;
+        }
+        .container {
+            background-color: #ffffff;
+            overflow: hidden;
+            width: fit-content;
+            min-width: 400px;
+            max-width: 600px;
+            margin: 0;
+            box-sizing: border-box;
+        }
+        .header {
+            background: linear-gradient(135deg, #722ed1 0%, #eb2f96 100%);
+            color: white;
+            padding: 15px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        .header p {
+            margin: 4px 0 0;
+            opacity: 0.9;
+            font-size: 12px;
+        }
+        .chart-container {
+            padding: 15px;
+            background-color: #fff;
+            text-align: center;
+        }
+        .chart-container img {
+            width: 100%;
+            height: auto;
+            border-radius: 4px;
+            border: 1px solid #eee;
+        }
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            margin-bottom: 15px;
+        }
+        .comparison-table th {
+            background-color: #fafafa;
+            color: #888;
+            font-weight: normal;
+            padding: 10px;
+            text-align: center;
+            border-bottom: 1px solid #eee;
+        }
+        .comparison-table td {
+            padding: 10px;
+            border-bottom: 1px solid #f0f0f0;
+            text-align: center;
+        }
+        .comparison-table td:first-child {
+            font-weight: bold;
+            color: #666;
+            text-align: left;
+            padding-left: 15px;
+            width: 30%;
+        }
+        .fund-a { color: #1890ff; font-weight: bold; }
+        .fund-b { color: #eb2f96; font-weight: bold; }
+        
+        .winner {
+            background-color: #fff7e6; /* 浅黄色高亮 */
+            border-radius: 4px;
+            padding: 2px 6px;
+        }
+
+        .footer {
+            background-color: #f9f9f9;
+            padding: 8px 15px;
+            text-align: center;
+            color: #bbb;
+            font-size: 10px;
+            border-top: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>基金对比报告</h1>
+            <p>{{ fund_a_name }} vs {{ fund_b_name }}</p>
+        </div>
+
+        {% if plot_img %}
+        <div class="chart-container">
+            <img src="data:image/png;base64,{{ plot_img }}" alt="对比走势图">
+        </div>
+        {% endif %}
+
+        <table class="comparison-table">
+            <thead>
+                <tr>
+                    <th>指标 (近{{ days }}天)</th>
+                    <th style="color: #1890ff">{{ fund_a_name }}</th>
+                    <th style="color: #eb2f96">{{ fund_b_name }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>最新净值</td>
+                    <td>{{ '%.4f'|format(metrics_a.latest_price) }}</td>
+                    <td>{{ '%.4f'|format(metrics_b.latest_price) }}</td>
+                </tr>
+                <tr>
+                    <td>区间收益</td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_a.total_return > metrics_b.total_return else '' }}">
+                            {{ '%+.2f'|format(metrics_a.total_return) }}%
+                        </span>
+                    </td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_b.total_return > metrics_a.total_return else '' }}">
+                            {{ '%+.2f'|format(metrics_b.total_return) }}%
+                        </span>
+                    </td>
+                </tr>
+                <tr>
+                    <td>最大回撤</td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_a.max_drawdown|abs < metrics_b.max_drawdown|abs else '' }}">
+                            {{ '%.2f'|format(metrics_a.max_drawdown) }}%
+                        </span>
+                    </td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_b.max_drawdown|abs < metrics_a.max_drawdown|abs else '' }}">
+                            {{ '%.2f'|format(metrics_b.max_drawdown) }}%
+                        </span>
+                    </td>
+                </tr>
+                <tr>
+                    <td>年化波动</td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_a.volatility < metrics_b.volatility else '' }}">
+                            {{ '%.2f'|format(metrics_a.volatility) }}%
+                        </span>
+                    </td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_b.volatility < metrics_a.volatility else '' }}">
+                            {{ '%.2f'|format(metrics_b.volatility) }}%
+                        </span>
+                    </td>
+                </tr>
+                <tr>
+                    <td>夏普比率</td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_a.sharpe_ratio > metrics_b.sharpe_ratio else '' }}">
+                            {{ '%.2f'|format(metrics_a.sharpe_ratio) }}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="{{ 'winner' if metrics_b.sharpe_ratio > metrics_a.sharpe_ratio else '' }}">
+                            {{ '%.2f'|format(metrics_b.sharpe_ratio) }}
+                        </span>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="footer">
+            数据来源：AstrBot Fund Analyzer · 生成时间：{{ generated_time }}
+        </div>
+    </div>
+</body>
+</html>

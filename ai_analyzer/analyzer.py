@@ -42,7 +42,7 @@ class AIFundAnalyzer:
         fund_code: str,
     ) -> str:
         """
-        获取基金相关新闻摘要
+        获取基金相关新闻摘要（增强版，含季节性因素和国际形势）
 
         Args:
             fund_name: 基金名称
@@ -58,10 +58,22 @@ class AIFundAnalyzer:
         # 获取影响因素
         factors = self.factors.get_factors(fund_name)
 
-        # 构建提示词
+        # 获取季节性背景
+        seasonal_context = self.factors.get_current_seasonal_context(fund_name)
+
+        # 获取增强版搜索关键词
+        search_keywords = self.factors.get_news_search_keywords(fund_name)
+
+        # 获取国际形势分析文本
+        global_situation_text = self.factors.format_global_situation_text(fund_name)
+
+        # 构建提示词（使用增强版，含国际形势）
         prompt = self.prompt_builder.build_news_prompt(
             fund_name=fund_name,
             underlying=factors["underlying"],
+            seasonal_context=seasonal_context,
+            search_keywords=search_keywords,
+            global_situation_text=global_situation_text,
         )
 
         try:
@@ -117,13 +129,16 @@ class AIFundAnalyzer:
         # 4. 获取影响因素文本
         factors_text = self.factors.format_factors_text(fund_info.name)
 
-        # 5. 格式化历史数据
+        # 5. 获取国际形势分析文本
+        global_situation_text = self.factors.format_global_situation_text(fund_info.name)
+
+        # 6. 格式化历史数据
         history_summary = self.prompt_builder.format_history_summary(history_data)
 
-        # 6. 获取新闻摘要
+        # 7. 获取新闻摘要（含国际形势）
         news_summary = await self.get_news_summary(fund_info.name, fund_info.code)
 
-        # 7. 构建分析提示词（使用新模板）
+        # 8. 构建分析提示词（使用新模板，含国际形势）
         analysis_prompt = self._build_quant_analysis_prompt(
             fund_info=fund_info,
             performance_summary=performance_summary,
@@ -132,9 +147,10 @@ class AIFundAnalyzer:
             factors_text=factors_text,
             history_summary=history_summary,
             news_summary=news_summary,
+            global_situation_text=global_situation_text,
         )
 
-        # 8. 调用大模型分析
+        # 9. 调用大模型分析
         response = await provider.text_chat(
             prompt=analysis_prompt,
             session_id=f"fund_analysis_{fund_info.code}_{user_id}",
@@ -152,8 +168,9 @@ class AIFundAnalyzer:
         factors_text: str,
         history_summary: str,
         news_summary: str,
+        global_situation_text: str = "",
     ) -> str:
-        """构建包含量化数据的分析提示词"""
+        """构建包含量化数据和国际形势的分析提示词"""
         from .prompts import ANALYSIS_PROMPT_TEMPLATE
 
         return ANALYSIS_PROMPT_TEMPLATE.format(
@@ -162,6 +179,7 @@ class AIFundAnalyzer:
             latest_price=fund_info.latest_price,
             change_rate=fund_info.change_rate,
             amount=fund_info.amount,
+            current_date=datetime.now().strftime("%Y年%m月%d日"),
             performance_summary=performance_summary
             if performance_summary
             else "暂无数据",
@@ -172,6 +190,9 @@ class AIFundAnalyzer:
             if backtest_summary
             else "历史数据不足，无法回测",
             factors_text=factors_text,
+            global_situation_text=global_situation_text
+            if global_situation_text
+            else "暂无国际形势分析",
             history_summary=history_summary if history_summary else "暂无数据",
             news_summary=news_summary if news_summary else "暂无相关新闻",
         )

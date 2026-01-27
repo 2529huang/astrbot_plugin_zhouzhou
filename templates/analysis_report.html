@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>基金技术分析报告</title>
+    <style>
+        body {
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            margin: 0;
+            padding: 0;
+            color: #333;
+            background-color: transparent;
+            display: inline-block;
+        }
+        .container {
+            background-color: #ffffff;
+            width: fit-content;
+            min-width: 375px;
+            max-width: 500px;
+            overflow: hidden;
+            box-sizing: border-box;
+        }
+        .header {
+            background: linear-gradient(135deg, #722ed1 0%, #9254de 100%);
+            color: white;
+            padding: 15px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        .header p {
+            margin: 4px 0 0;
+            opacity: 0.9;
+            font-size: 12px;
+        }
+        .price-section {
+            padding: 15px;
+            text-align: center;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .current-price {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .price-change {
+            font-size: 14px;
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+        }
+        .up { color: #f5222d; }
+        .down { color: #52c41a; }
+        
+        .chart-container {
+            padding: 15px;
+            background-color: #fff;
+            text-align: center;
+        }
+        .chart-container img {
+            width: 100%;
+            height: auto;
+            border-radius: 4px;
+            border: 1px solid #eee;
+        }
+
+        .section-title {
+            padding: 0 15px;
+            margin: 10px 0 5px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #666;
+            border-left: 3px solid #722ed1;
+            line-height: 1.2;
+        }
+
+        .analysis-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            padding: 10px 15px;
+        }
+        .analysis-item {
+            background-color: #f9f9f9;
+            padding: 10px;
+            border-radius: 6px;
+        }
+        .analysis-label {
+            color: #888;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+        .analysis-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: white;
+            font-weight: normal;
+        }
+        .bg-red { background-color: #f5222d; }
+        .bg-green { background-color: #52c41a; }
+        .bg-blue { background-color: #1890ff; }
+        .bg-orange { background-color: #fa8c16; }
+        .bg-gray { background-color: #d9d9d9; color: #666; }
+
+        .ma-list {
+            padding: 5px 15px 15px;
+        }
+        .ma-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px dashed #eee;
+            font-size: 13px;
+        }
+        .ma-item:last-child { border-bottom: none; }
+        
+        .footer {
+            background-color: #f9f9f9;
+            padding: 8px 15px;
+            text-align: center;
+            color: #bbb;
+            font-size: 10px;
+            border-top: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ fund_name }}</h1>
+            <p>{{ fund_code }} · 技术分析报告</p>
+        </div>
+
+        <div class="price-section">
+            <div class="current-price {{ 'up' if change_rate > 0 else 'down' if change_rate < 0 else '' }}">
+                {{ '%.4f'|format(latest_price) }}
+            </div>
+            <div class="price-change">
+                <span class="{{ 'up' if change_amount > 0 else 'down' if change_amount < 0 else '' }}">
+                    {{ '%+.4f'|format(change_amount) }}
+                </span>
+                <span class="{{ 'up' if change_rate > 0 else 'down' if change_rate < 0 else '' }}">
+                    {{ '%+.2f'|format(change_rate) }}%
+                </span>
+            </div>
+        </div>
+
+        {% if plot_img %}
+        <div class="chart-container">
+            <img src="data:image/png;base64,{{ plot_img }}" alt="行情走势">
+        </div>
+        {% endif %}
+
+        <div class="section-title">趋势研判</div>
+        <div class="analysis-grid">
+            <div class="analysis-item">
+                <div class="analysis-label">整体趋势</div>
+                <div class="analysis-value">
+                    {% if "上涨" in trend %}
+                        <span class="badge bg-red">{{ trend }}</span>
+                    {% elif "下跌" in trend %}
+                        <span class="badge bg-green">{{ trend }}</span>
+                    {% elif "震荡" in trend %}
+                        <span class="badge bg-blue">{{ trend }}</span>
+                    {% else %}
+                        <span class="badge bg-gray">{{ trend }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="analysis-item">
+                <div class="analysis-label">20日波动率</div>
+                <div class="analysis-value">{{ '%.4f'|format(volatility) if volatility else '--' }}</div>
+            </div>
+        </div>
+
+        <div class="section-title">均线系统</div>
+        <div class="ma-list">
+            {% for ma in ma_data %}
+            <div class="ma-item">
+                <span>{{ ma.name }} ({{ '%.4f'|format(ma.value) }})</span>
+                {% if latest_price > ma.value %}
+                    <span class="badge bg-red">股价位于上方</span>
+                {% else %}
+                    <span class="badge bg-green">股价位于下方</span>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% if not ma_data %}
+            <div class="ma-item" style="color: #999;">暂无均线数据</div>
+            {% endif %}
+        </div>
+
+        <div class="section-title">区间表现</div>
+        <div class="analysis-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+            <div class="analysis-item" style="text-align: center;">
+                <div class="analysis-label">5日收益</div>
+                <div class="analysis-value {{ 'up' if return_5d and return_5d > 0 else 'down' if return_5d and return_5d < 0 else '' }}">
+                    {{ '%+.2f'|format(return_5d) if return_5d is not none else '--' }}%
+                </div>
+            </div>
+            <div class="analysis-item" style="text-align: center;">
+                <div class="analysis-label">10日收益</div>
+                <div class="analysis-value {{ 'up' if return_10d and return_10d > 0 else 'down' if return_10d and return_10d < 0 else '' }}">
+                    {{ '%+.2f'|format(return_10d) if return_10d is not none else '--' }}%
+                </div>
+            </div>
+            <div class="analysis-item" style="text-align: center;">
+                <div class="analysis-label">20日收益</div>
+                <div class="analysis-value {{ 'up' if return_20d and return_20d > 0 else 'down' if return_20d and return_20d < 0 else '' }}">
+                    {{ '%+.2f'|format(return_20d) if return_20d is not none else '--' }}%
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            AstrBot Fund Analyzer · 投资需谨慎 · {{ generated_time }}
+        </div>
+    </div>
+</body>
+</html>

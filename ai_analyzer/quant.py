@@ -190,6 +190,9 @@ class QuantAnalyzer:
         middle = self._sma(prices, period)
         std = self._std(prices[-period:])
 
+        if middle is None:
+            return None, None, None
+
         upper = middle + std_dev * std
         lower = middle - std_dev * std
 
@@ -251,9 +254,18 @@ class QuantAnalyzer:
         if not history_data or len(history_data) < 5:
             return indicators
 
-        closes = [d["close"] for d in history_data]
-        highs = [d.get("high", d["close"]) for d in history_data]
-        lows = [d.get("low", d["close"]) for d in history_data]
+        # 安全地提取数据，处理可能出现的非数值类型
+        def safe_float(val):
+            try:
+                if val is None:
+                    return 0.0
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
+        closes = [safe_float(d.get("close", 0)) for d in history_data]
+        highs = [safe_float(d.get("high", c)) for d, c in zip(history_data, closes)]
+        lows = [safe_float(d.get("low", c)) for d, c in zip(history_data, closes)]
 
         # 均线
         indicators.ma5 = self._sma(closes, 5)
