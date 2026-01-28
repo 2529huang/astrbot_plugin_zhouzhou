@@ -1,4 +1,4 @@
-# 📊 AstrBot 基金分析插件
+# AstrBot 基金分析插件
 
 ![astrbot_plugin_fund_analyzer](https://count.getloli.com/@astrbot_plugin_fund_analyzer)
 
@@ -6,7 +6,54 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-v4.0+-purple.svg)](https://astrbot.app)
 
-为 AstrBot 提供专业的基金数据分析功能。支持实时行情、技术分析、量化指标、策略回测、AI 智能分析等丰富特性。
+>  **AI 驱动的智能基金分析工具** —— 让投资决策更科学、更高效
+
+为 AstrBot 提供专业的基金数据分析功能。**支持 AI 智能分析**、实时行情、技术分析、量化指标、策略回测等丰富特性。
+
+---
+
+## 🤖 核心亮点：AI 智能分析
+
+<table>
+<tr>
+<td width="60%">
+
+### ✨ 让 AI 成为你的投资顾问
+
+- 🧠 **深度量化解读** - AI 结合夏普比率、最大回撤等专业指标，给出通俗易懂的解读
+- 📈 **技术面综合研判** - 融合 MACD、RSI、KDJ、布林带等多维度指标
+- 🔮 **趋势预测建议** - 短期/中期走势分析，把握入场时机
+- ⚠️ **智能风险预警** - 基于历史数据和市场情绪的风险评估
+- 💡 **个性化投资建议** - 根据基金类型定制分析策略
+
+</td>
+<td width="40%">
+
+```
+📊 AI 智能分析报告
+
+【量化评估】
+夏普比率 1.25，风险收益比优秀
+最大回撤 8.3%，风控良好
+
+【技术研判】
+MACD 金叉形成，RSI 55 中性偏强
+短期均线多头排列
+
+【AI 建议】
+当前处于上升趋势初期，可考虑
+分批建仓，注意设置止损位...
+```
+
+</td>
+</tr>
+</table>
+
+> 💡 **使用方法**：发送 `智能分析 161226` 即可获取 AI 分析报告
+> 
+> ⚙️ **配置要求**：需在 AstrBot 管理面板配置 LLM 提供商（OpenAI、Claude、Gemini 等）
+
+---
 
 ## ✨ 功能特色
 
@@ -30,14 +77,6 @@
 - **MA 交叉策略**：金叉买入、死叉卖出
 - **RSI 策略**：超卖反弹、超买卖出
 - **回测指标**：胜率、盈亏比、最大回撤
-
-### 🤖 AI 智能分析
-- **量化数据解读**：结合绩效指标深度分析
-- **技术面解读**：综合多指标给出信号
-- **趋势预测**：短期/中期走势预测
-- **风险提示**：基于量化数据的风险评估
-
-> ⚠️ **注意**：AI 智能分析功能需要在 AstrBot 管理面板中配置 LLM 提供商（如 OpenAI、Claude 等）。
 
 ## 📦 安装配置
 
@@ -167,22 +206,6 @@ MACD: 红柱
 
 ### 添加基金类型
 编辑 `ai_analyzer/factors.py` 的 `FUND_TYPE_FACTORS` 可添加新的基金类型识别规则。
-
-## 📁 项目结构
-
-```
-astrbot_plugin_fund_analyzer/
-├── __init__.py
-├── main.py              # 主插件入口
-├── metadata.yaml        # 插件元数据
-├── README.md
-└── ai_analyzer/         # AI 分析模块
-    ├── __init__.py
-    ├── analyzer.py      # AI 分析器核心
-    ├── factors.py       # 基金影响因素
-    ├── prompts.py       # 提示词模板
-    └── quant.py         # 量化分析引擎
-```
 
 ## ⚠️ 免责声明
 

@@ -18,8 +18,12 @@ from astrbot.core.utils.t2i.renderer import HtmlRenderer
 
 # 导入股票分析模块
 from .stock import StockAnalyzer, StockInfo
+
 # 导入本地图片生成器
 from .image_generator import render_fund_image, PLAYWRIGHT_AVAILABLE
+
+# 导入东方财富 API 模块（直接 HTTP 请求，不依赖 akshare）
+from .eastmoney_api import get_api as get_eastmoney_api
 
 # 默认超时时间（秒）- AKShare获取LOF数据需要较长时间
 DEFAULT_TIMEOUT = 120  # 2分钟
@@ -79,27 +83,9 @@ class FundAnalyzer:
     DEFAULT_FUND_NAME = "国投瑞银白银期货(LOF)A"
 
     def __init__(self):
-        self._ak = None
-        self._pd = None
-        self._initialized = False
-        # 缓存 LOF 基金列表数据
-        self._lof_cache = None
-        self._lof_cache_time = None
-
-    async def _ensure_init(self):
-        """确保akshare已初始化"""
-        if not self._initialized:
-            try:
-                import akshare as ak
-                import pandas as pd
-
-                self._ak = ak
-                self._pd = pd
-                self._initialized = True
-                logger.info("AKShare 库初始化成功")
-            except ImportError as e:
-                logger.error(f"AKShare 库导入失败: {e}")
-                raise ImportError("请先安装 akshare 库: pip install akshare")
+        # 使用东方财富 API 模块（不再依赖 akshare）
+        self._api = get_eastmoney_api()
+        self._initialized = True
 
     def _safe_float(self, value, default: float = 0.0) -> float:
         """安全地将值转换为float，处理NaN和None"""
@@ -117,56 +103,6 @@ class FundAnalyzer:
         except (ValueError, TypeError):
             return default
 
-    async def _fetch_with_retry(self, func, *args, max_retries=3, **kwargs):
-        """
-        带重试机制的异步数据获取 helper
-        """
-        for attempt in range(max_retries):
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(func, *args, **kwargs), timeout=DEFAULT_TIMEOUT
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                if attempt == max_retries - 1:
-                    raise e
-                wait_time = (attempt + 1) * 2  # 线性退避: 2s, 4s, 6s...
-                logger.warning(
-                    f"数据获取失败 (第{attempt + 1}次重试): {e}, 等待 {wait_time}秒..."
-                )
-                await asyncio.sleep(wait_time)
-
-    async def _get_lof_data(self):
-        """获取LOF基金数据（带缓存）"""
-        now = datetime.now()
-
-        # 检查缓存是否有效
-        if (
-            self._lof_cache is not None
-            and self._lof_cache_time is not None
-            and (now - self._lof_cache_time).total_seconds() < CACHE_TTL
-        ):
-            logger.debug("使用缓存的LOF基金数据")
-            return self._lof_cache
-
-        # 缓存过期或不存在，重新获取
-        logger.info("正在从东方财富获取LOF基金数据，请稍候...")
-        try:
-            # 使用重试机制
-            df = await self._fetch_with_retry(self._ak.fund_lof_spot_em)
-
-            # 更新缓存
-            self._lof_cache = df
-            self._lof_cache_time = now
-            logger.info(f"LOF基金数据获取成功，共 {len(df)} 只基金")
-            return df
-        except Exception as e:
-            logger.error(f"获取LOF基金数据失败: {e}")
-            # 如果有旧缓存，返回旧缓存
-            if self._lof_cache is not None:
-                logger.warning("使用过期的缓存数据")
-                return self._lof_cache
-            raise TimeoutError("数据获取超时，请稍后重试")
-
     async def get_lof_realtime(self, fund_code: str = None) -> FundInfo | None:
         """
         获取LOF基金实时行情
@@ -177,57 +113,31 @@ class FundAnalyzer:
         Returns:
             FundInfo 对象或 None
         """
-        await self._ensure_init()
-
         if fund_code is None:
             fund_code = self.DEFAULT_FUND_CODE
 
+        fund_code = str(fund_code).strip()
+
         try:
-            # 获取LOF基金实时行情（使用缓存）
-            df = await self._get_lof_data()
-
-            # 确保基金代码是字符串格式
-            fund_code = str(fund_code).strip()
-            logger.debug(f"查询基金代码: '{fund_code}', 类型: {type(fund_code)}")
-
-            # 查找指定基金
-            fund_data = df[df["代码"] == fund_code]
-
-            if fund_data.empty:
-                logger.warning(f"未找到基金代码: {fund_code}")
+            data = await self._api.get_fund_realtime(fund_code)
+            if not data:
+                logger.warning(f"未找到基金数据: {fund_code}")
                 return None
 
-            row = fund_data.iloc[0]
-
             return FundInfo(
-                code=str(row["代码"]) if "代码" in row.index else fund_code,
-                name=str(row["名称"]) if "名称" in row.index else "",
-                latest_price=self._safe_float(
-                    row["最新价"] if "最新价" in row.index else 0
-                ),
-                change_amount=self._safe_float(
-                    row["涨跌额"] if "涨跌额" in row.index else 0
-                ),
-                change_rate=self._safe_float(
-                    row["涨跌幅"] if "涨跌幅" in row.index else 0
-                ),
-                open_price=self._safe_float(
-                    row["开盘价"] if "开盘价" in row.index else 0
-                ),
-                high_price=self._safe_float(
-                    row["最高价"] if "最高价" in row.index else 0
-                ),
-                low_price=self._safe_float(
-                    row["最低价"] if "最低价" in row.index else 0
-                ),
-                prev_close=self._safe_float(row["昨收"] if "昨收" in row.index else 0),
-                volume=self._safe_float(row["成交量"] if "成交量" in row.index else 0),
-                amount=self._safe_float(row["成交额"] if "成交额" in row.index else 0),
-                turnover_rate=self._safe_float(
-                    row["换手率"] if "换手率" in row.index else 0
-                ),
+                code=data.get("code", fund_code),
+                name=data.get("name", ""),
+                latest_price=data.get("latest_price", 0.0),
+                change_amount=data.get("change_amount", 0.0),
+                change_rate=data.get("change_rate", 0.0),
+                open_price=data.get("open_price", 0.0),
+                high_price=data.get("high_price", 0.0),
+                low_price=data.get("low_price", 0.0),
+                prev_close=data.get("prev_close", 0.0),
+                volume=data.get("volume", 0.0),
+                amount=data.get("amount", 0.0),
+                turnover_rate=data.get("turnover_rate", 0.0),
             )
-
         except Exception as e:
             logger.error(f"获取LOF基金实时行情失败: {e}")
             return None
@@ -246,72 +156,14 @@ class FundAnalyzer:
         Returns:
             历史数据列表或 None
         """
-        await self._ensure_init()
-
         if fund_code is None:
             fund_code = self.DEFAULT_FUND_CODE
 
-        # 确保基金代码是字符串格式
         fund_code = str(fund_code).strip()
 
         try:
-            end_date = datetime.now()
-            # 使用 days * 3 以覆盖长假期（如春节、国庆），确保有足够交易日
-            # 额外加 60 天作为技术指标计算的预热数据
-            start_date = end_date - timedelta(days=days * 3 + 60)
-
-            df = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._ak.fund_lof_hist_em,
-                    symbol=fund_code,
-                    period="daily",
-                    start_date=start_date.strftime("%Y%m%d"),
-                    end_date=end_date.strftime("%Y%m%d"),
-                    adjust=adjust,
-                ),
-                timeout=DEFAULT_TIMEOUT,
-            )
-
-            if df is None or df.empty:
-                return None
-
-            # 只取最近N天
-            df = df.tail(days)
-
-            result = []
-            for _, row in df.iterrows():
-                result.append(
-                    {
-                        "date": str(row["日期"]) if "日期" in row.index else "",
-                        "open": self._safe_float(
-                            row["开盘"] if "开盘" in row.index else 0
-                        ),
-                        "close": self._safe_float(
-                            row["收盘"] if "收盘" in row.index else 0
-                        ),
-                        "high": self._safe_float(
-                            row["最高"] if "最高" in row.index else 0
-                        ),
-                        "low": self._safe_float(
-                            row["最低"] if "最低" in row.index else 0
-                        ),
-                        "volume": self._safe_float(
-                            row["成交量"] if "成交量" in row.index else 0
-                        ),
-                        "amount": self._safe_float(
-                            row["成交额"] if "成交额" in row.index else 0
-                        ),
-                        "change_rate": self._safe_float(
-                            row["涨跌幅"] if "涨跌幅" in row.index else 0
-                        ),
-                    }
-                )
-
-            return result
-
-        except asyncio.TimeoutError:
-            logger.error(f"获取LOF基金历史行情超时: {fund_code}")
-            return None
+            history = await self._api.get_fund_history(fund_code, days, adjust)
+            return history
         except Exception as e:
             logger.error(f"获取LOF基金历史行情失败: {e}")
             return None
@@ -326,35 +178,9 @@ class FundAnalyzer:
         Returns:
             匹配的基金列表
         """
-        await self._ensure_init()
-
         try:
-            df = await self._get_lof_data()
-
-            # 搜索代码或名称包含关键词的基金
-            mask = df["代码"].str.contains(keyword, na=False) | df["名称"].str.contains(
-                keyword, na=False
-            )
-
-            results = df[mask].head(10)  # 最多返回10条
-
-            fund_list = []
-            for _, row in results.iterrows():
-                fund_list.append(
-                    {
-                        "code": str(row["代码"]) if "代码" in row.index else "",
-                        "name": str(row["名称"]) if "名称" in row.index else "",
-                        "latest_price": self._safe_float(
-                            row["最新价"] if "最新价" in row.index else 0
-                        ),
-                        "change_rate": self._safe_float(
-                            row["涨跌幅"] if "涨跌幅" in row.index else 0
-                        ),
-                    }
-                )
-
-            return fund_list
-
+            results = await self._api.search_fund(keyword)
+            return results
         except Exception as e:
             logger.error(f"搜索基金失败: {e}")
             return []
@@ -960,9 +786,29 @@ class FundAnalyzerPlugin(Star):
             if info:
                 yield event.plain_result(self._format_fund_info(info))
             else:
+                # 区分是基金代码错误还是数据源问题
+                if not normalized_code:
+                    yield event.plain_result(f"❌ 基金代码不能为空")
+                    return
+
+                # 如果代码是6位数字，通常是有效的基金代码格式，但未找到数据
+                if len(normalized_code) == 6 and normalized_code.isdigit():
+                    # 尝试再次搜索确认是否存在
+                    try:
+                        search_res = await self.analyzer.search_fund(normalized_code)
+                        if not search_res:
+                            yield event.plain_result(
+                                f"❌ 未找到基金代码 {fund_code}\n"
+                                "💡 请检查代码是否正确，或使用「搜索基金 关键词」查找"
+                            )
+                            return
+                    except Exception:
+                        pass  # 搜索出错忽略，继续下面的判断
+
                 yield event.plain_result(
-                    f"❌ 未找到基金代码 {fund_code}\n"
-                    "💡 请使用「搜索基金 关键词」来搜索正确的基金代码"
+                    f"⚠️ 暂时无法获取基金 {fund_code} 的数据\n"
+                    "💡 可能是数据源暂时不可用，或该基金为非LOF基金\n"
+                    "💡 请稍后重试"
                 )
 
         except ImportError:
@@ -993,7 +839,30 @@ class FundAnalyzerPlugin(Star):
             # 获取实时行情
             info = await self.analyzer.get_lof_realtime(fund_code)
             if not info:
-                yield event.plain_result(f"❌ 未找到基金代码 {fund_code}")
+                # 区分是基金代码错误还是数据源问题
+                if not normalized_code:
+                    yield event.plain_result(f"❌ 基金代码不能为空")
+                    return
+
+                # 如果代码是6位数字，通常是有效的基金代码格式，但未找到数据
+                if len(normalized_code) == 6 and normalized_code.isdigit():
+                    # 尝试再次搜索确认是否存在
+                    try:
+                        search_res = await self.analyzer.search_fund(normalized_code)
+                        if not search_res:
+                            yield event.plain_result(
+                                f"❌ 未找到基金代码 {fund_code}\n"
+                                "💡 请检查代码是否正确，或使用「搜索基金 关键词」查找"
+                            )
+                            return
+                    except Exception:
+                        pass  # 搜索出错忽略，继续下面的判断
+
+                yield event.plain_result(
+                    f"⚠️ 暂时无法获取基金 {fund_code} 的数据\n"
+                    "💡 可能是数据源暂时不可用，或该基金为非LOF基金\n"
+                    "💡 请稍后重试"
+                )
                 return
 
             # 获取历史数据进行分析
@@ -1247,9 +1116,7 @@ class FundAnalyzerPlugin(Star):
                 if self.use_local_renderer:
                     try:
                         img_path = await render_fund_image(
-                            template_path=template_path,
-                            template_data=data,
-                            width=420
+                            template_path=template_path, template_data=data, width=420
                         )
                         yield event.image_result(img_path)
                     except Exception as e:
@@ -1416,10 +1283,31 @@ class FundAnalyzerPlugin(Star):
             # 1. 获取基金基本信息
             info = await self.analyzer.get_lof_realtime(fund_code)
             if not info:
+                # 区分是基金代码错误还是数据源问题
+                if not normalized_code:
+                    yield event.plain_result(f"❌ 基金代码不能为空")
+                    return
+
+                # 如果代码是6位数字，通常是有效的基金代码格式，但未找到数据
+                if len(normalized_code) == 6 and normalized_code.isdigit():
+                    # 尝试再次搜索确认是否存在
+                    try:
+                        search_res = await self.analyzer.search_fund(normalized_code)
+                        if not search_res:
+                            yield event.plain_result(
+                                f"❌ 未找到基金代码 {fund_code}\n"
+                                "💡 请检查代码是否正确，或使用「搜索基金 关键词」查找"
+                            )
+                            return
+                    except Exception:
+                        pass  # 搜索出错忽略，继续下面的判断
+
                 yield event.plain_result(
-                    f"❌ 未找到基金代码 {fund_code}\n"
-                    "💡 请使用「搜索基金 关键词」查找正确代码"
+                    f"⚠️ 暂时无法获取基金 {fund_code} 的数据\n"
+                    "💡 可能是数据源暂时不可用，或该基金为非LOF基金\n"
+                    "💡 请稍后重试"
                 )
+                return
                 return
 
             # 2. 获取历史数据（获取60天以支持更多回测策略）
@@ -1501,16 +1389,30 @@ class FundAnalyzerPlugin(Star):
 """.strip()
                     yield event.plain_result(f"{header}\n\n{analysis_result}")
                 else:
-                    with open(template_path, "r", encoding="utf-8") as f:
-                        template_str = f.read()
-
-                    # 渲染图片
-                    img_url = await self.image_renderer.render_custom_template(
-                        tmpl_str=template_str, tmpl_data=data, return_url=True
-                    )
-
-                    # 发送图片
-                    yield event.image_result(img_url)
+                    # 渲染图片 - 优先使用本地渲染器
+                    if self.use_local_renderer:
+                        try:
+                            img_path = await render_fund_image(
+                                template_path=template_path,
+                                template_data=data,
+                                width=480
+                            )
+                            yield event.image_result(img_path)
+                        except Exception as e:
+                            logger.warning(f"本地渲染失败，回退到网络渲染: {e}")
+                            with open(template_path, "r", encoding="utf-8") as f:
+                                template_str = f.read()
+                            img_url = await self.image_renderer.render_custom_template(
+                                tmpl_str=template_str, tmpl_data=data, return_url=True
+                            )
+                            yield event.image_result(img_url)
+                    else:
+                        with open(template_path, "r", encoding="utf-8") as f:
+                            template_str = f.read()
+                        img_url = await self.image_renderer.render_custom_template(
+                            tmpl_str=template_str, tmpl_data=data, return_url=True
+                        )
+                        yield event.image_result(img_url)
 
                 # 添加免责声明 (如果是图片模式，免责声明已包含在图片底部，这里可以省略，或者发一条简短的)
                 # yield event.plain_result("⚠️ 投资有风险，决策需谨慎。")
@@ -1556,10 +1458,31 @@ class FundAnalyzerPlugin(Star):
             # 1. 获取基金基本信息
             info = await self.analyzer.get_lof_realtime(fund_code)
             if not info:
+                # 区分是基金代码错误还是数据源问题
+                if not normalized_code:
+                    yield event.plain_result(f"❌ 基金代码不能为空")
+                    return
+
+                # 如果代码是6位数字，通常是有效的基金代码格式，但未找到数据
+                if len(normalized_code) == 6 and normalized_code.isdigit():
+                    # 尝试再次搜索确认是否存在
+                    try:
+                        search_res = await self.analyzer.search_fund(normalized_code)
+                        if not search_res:
+                            yield event.plain_result(
+                                f"❌ 未找到基金代码 {fund_code}\n"
+                                "💡 请检查代码是否正确，或使用「搜索基金 关键词」查找"
+                            )
+                            return
+                    except Exception:
+                        pass  # 搜索出错忽略，继续下面的判断
+
                 yield event.plain_result(
-                    f"❌ 未找到基金代码 {fund_code}\n"
-                    "💡 请使用「搜索基金 关键词」查找正确代码"
+                    f"⚠️ 暂时无法获取基金 {fund_code} 的数据\n"
+                    "💡 可能是数据源暂时不可用，或该基金为非LOF基金\n"
+                    "💡 请稍后重试"
                 )
+                return
                 return
 
             # 2. 获取60天历史数据
@@ -1774,10 +1697,45 @@ class FundAnalyzerPlugin(Star):
             )
 
             if not info1:
-                yield event.plain_result(f"❌ 未找到基金: {code1}")
+                # 尝试区分错误原因 (基金1)
+                if len(code1) == 6 and code1.isdigit():
+                    try:
+                        search_res = await self.analyzer.search_fund(code1)
+                        if not search_res:
+                            yield event.plain_result(
+                                f"❌ 未找到基金代码 {code1}\n"
+                                "💡 请检查代码是否正确，或使用「搜索基金 关键词」查找"
+                            )
+                            return
+                    except Exception:
+                        pass
+
+                yield event.plain_result(
+                    f"⚠️ 暂时无法获取基金 {code1} 的数据\n"
+                    "💡 可能是数据源暂时不可用，或该基金为非LOF基金\n"
+                    "💡 请稍后重试"
+                )
                 return
+
             if not info2:
-                yield event.plain_result(f"❌ 未找到基金: {code2}")
+                # 尝试区分错误原因 (基金2)
+                if len(code2) == 6 and code2.isdigit():
+                    try:
+                        search_res = await self.analyzer.search_fund(code2)
+                        if not search_res:
+                            yield event.plain_result(
+                                f"❌ 未找到基金代码 {code2}\n"
+                                "💡 请检查代码是否正确，或使用「搜索基金 关键词」查找"
+                            )
+                            return
+                    except Exception:
+                        pass
+
+                yield event.plain_result(
+                    f"⚠️ 暂时无法获取基金 {code2} 的数据\n"
+                    "💡 可能是数据源暂时不可用，或该基金为非LOF基金\n"
+                    "💡 请稍后重试"
+                )
                 return
             if not hist1 or len(hist1) < 10:
                 yield event.plain_result(f"⚠️ 基金 {code1} 历史数据不足")

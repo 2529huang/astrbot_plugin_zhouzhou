@@ -1,10 +1,15 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智能量化分析报告</title>
     <style>
+        html {
+            width: fit-content;
+        }
+
         body {
             font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
             margin: 0;
@@ -12,41 +17,43 @@
             color: #333;
             background-color: transparent;
             display: inline-block;
+            width: fit-content;
         }
+
         .container {
             background-color: #ffffff;
-            /* 移除固定宽度，使用 fit-content 自适应 */
-            width: fit-content;
-            min-width: 400px; /* 最小宽度 */
-            max-width: 600px; /* 最大宽度，防止过宽 */
+            width: 480px;
             overflow: hidden;
             box-sizing: border-box;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 0;
         }
+
         .header {
             background: linear-gradient(135deg, #1890ff 0%, #36cfc9 100%);
             color: white;
             padding: 15px;
             text-align: center;
         }
+
         .header h1 {
             margin: 0;
             font-size: 22px;
             font-weight: 600;
         }
+
         .header p {
             margin: 4px 0 0;
             opacity: 0.9;
             font-size: 13px;
         }
-        
+
         .price-section {
             padding: 15px;
             text-align: center;
             border-bottom: 1px solid #f0f0f0;
             background-color: #fafafa;
         }
+
         .current-price {
             font-size: 36px;
             font-weight: bold;
@@ -54,13 +61,14 @@
             margin-bottom: 5px;
             line-height: 1.2;
         }
+
         .price-details {
             display: flex;
             justify-content: center;
             gap: 15px;
             font-size: 15px;
         }
-        
+
         .section-title {
             padding: 0 15px;
             margin: 15px 0 10px;
@@ -73,7 +81,7 @@
             justify-content: space-between;
             align-items: center;
         }
-        
+
         .content-box {
             padding: 0 15px 10px;
             font-size: 14px;
@@ -81,7 +89,7 @@
             color: #555;
             text-align: justify;
         }
-        
+
         .ai-content {
             white-space: pre-wrap;
             background-color: #f6ffed;
@@ -92,7 +100,7 @@
             font-size: 14px;
             line-height: 1.6;
         }
-        
+
         .tag {
             display: inline-block;
             padding: 2px 8px;
@@ -100,13 +108,33 @@
             font-size: 12px;
             font-weight: normal;
         }
-        .tag-buy { background-color: #fff1f0; color: #f5222d; border: 1px solid #ffa39e; }
-        .tag-sell { background-color: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
-        .tag-neutral { background-color: #f0f5ff; color: #2f54eb; border: 1px solid #adc6ff; }
-        
-        .up { color: #f5222d; }
-        .down { color: #52c41a; }
-        
+
+        .tag-buy {
+            background-color: #fff1f0;
+            color: #f5222d;
+            border: 1px solid #ffa39e;
+        }
+
+        .tag-sell {
+            background-color: #f6ffed;
+            color: #52c41a;
+            border: 1px solid #b7eb8f;
+        }
+
+        .tag-neutral {
+            background-color: #f0f5ff;
+            color: #2f54eb;
+            border: 1px solid #adc6ff;
+        }
+
+        .up {
+            color: #f5222d;
+        }
+
+        .down {
+            color: #52c41a;
+        }
+
         .footer {
             background-color: #f9f9f9;
             padding: 10px 15px;
@@ -116,15 +144,34 @@
             border-top: 1px solid #eee;
             margin-top: 15px;
         }
-        
+
         /* Markdown 样式模拟 */
-        .markdown-body h3 { font-size: 15px; margin: 10px 0 5px; color: #333; }
-        .markdown-body p { margin: 5px 0; }
-        .markdown-body ul { padding-left: 20px; margin: 5px 0; }
-        .markdown-body li { margin-bottom: 3px; }
-        .markdown-body strong { color: #333; font-weight: 600; }
+        .markdown-body h3 {
+            font-size: 15px;
+            margin: 10px 0 5px;
+            color: #333;
+        }
+
+        .markdown-body p {
+            margin: 5px 0;
+        }
+
+        .markdown-body ul {
+            padding-left: 20px;
+            margin: 5px 0;
+        }
+
+        .markdown-body li {
+            margin-bottom: 3px;
+        }
+
+        .markdown-body strong {
+            color: #333;
+            font-weight: 600;
+        }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
@@ -149,11 +196,11 @@
         <div class="section-title">
             <span>技术信号</span>
             {% if "买入" in signal %}
-                <span class="tag tag-buy">{{ signal }} ({{ score }})</span>
+            <span class="tag tag-buy">{{ signal }} ({{ score }})</span>
             {% elif "卖出" in signal %}
-                <span class="tag tag-sell">{{ signal }} ({{ score }})</span>
+            <span class="tag tag-sell">{{ signal }} ({{ score }})</span>
             {% else %}
-                <span class="tag tag-neutral">{{ signal }} ({{ score }})</span>
+            <span class="tag tag-neutral">{{ signal }} ({{ score }})</span>
             {% endif %}
         </div>
 
@@ -168,4 +215,5 @@
         </div>
     </div>
 </body>
+
 </html>
